@@ -146,7 +146,7 @@ def cmd_leak(args, config):
     else:
         if result["leaks_found"]:
             if RICH_ENABLED:
-                table = Table(title="🚨 Leaks Discovered", style="red")
+                table = Table(title="[!] Leaks Discovered", style="red")
                 table.add_column("File", style="cyan")
                 table.add_column("Type", style="magenta")
                 table.add_column("Occurrences", justify="right", style="green")
@@ -235,7 +235,7 @@ def cmd_morph(args, config):
             print(json.dumps(result, indent=2))
         else:
             if RICH_ENABLED:
-                table = Table(title="🤖 Morph Analysis Results")
+                table = Table(title="[*] Morph Analysis Results")
                 table.add_column("File", style="cyan")
                 table.add_column("Top Prediction", style="magenta")
                 table.add_column("Confidence", justify="right", style="green")
@@ -298,7 +298,7 @@ def cmd_breach(args, config):
                     
                 if not args.json:
                     if RICH_ENABLED:
-                        console.print(f"\n[bold red]🚨 DANGER: Email found in {len(result['breaches'])} known data breaches![/bold red]")
+                        console.print(f"\n[bold red][!] DANGER: Email found in {len(result['breaches'])} known data breaches![/bold red]")
                         table = Table(show_header=False, box=None)
                         for b in result['breaches'][:10]:
                             table.add_row(f"[red]• {b}[/red]")
@@ -309,7 +309,7 @@ def cmd_breach(args, config):
                         print(f"[!] DANGER: Email found in {len(result['breaches'])} known data breaches!")
             elif response.status_code == 404:
                 if not args.json:
-                    console.print("\n[bold green]✅ Email looks clean. No breaches found.[/bold green]" if RICH_ENABLED else "[+] Email looks clean. No breaches found.")
+                    console.print("\n[bold green][+] Email looks clean. No breaches found.[/bold green]" if RICH_ENABLED else "[+] Email looks clean. No breaches found.")
             else:
                 if not args.json:
                     console.print(f"\n[bold yellow][-] API returned unexpected status code: {response.status_code}[/bold yellow]" if RICH_ENABLED else f"[-] API returned unexpected status code: {response.status_code}")
@@ -419,7 +419,7 @@ def cmd_phish(args, config):
             console.print(f"[*] Verdict: [bold {color}]{verdict}[/bold {color}]\n")
             
             if result["indicators"]:
-                table = Table(title="⚠️ Suspicious Indicators", show_header=False, style="yellow")
+                table = Table(title="[!] Suspicious Indicators", show_header=False, style="yellow")
                 for ind in result["indicators"]:
                     table.add_row(ind)
                 console.print(table)
