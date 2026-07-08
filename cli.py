@@ -427,6 +427,29 @@ def cmd_phish(args, config):
             print(f"[*] Risk Score: {result['risk_score']}/100")
             print(f"[*] Verdict: {verdict}")
 
+def animated_banner():
+    if RICH_ENABLED:
+        import time
+        from rich.align import Align
+        from rich.text import Text
+        from rich.live import Live
+        banner = r"""
+ __      __.___  _________ .___ ________    _______                _________ .____    .___ 
+/  \    /  \   |/   _____/ |   |\_____  \   \      \               \_   ___ \|    |   |   |
+\   \/\/   /   |\_____  \  |   | /   |   \  /   |   \    ______    /    \  \/|    |   |   |
+ \        /|   |/        \ |   |/    |    \/    |    \  /_____/    \     \___|    |___|   |
+  \__/\  / |___/_______  / |___|\_______  /\____|__  /              \______  /_______ \___|
+       \/              \/               \/         \/                      \/        \/    
+"""
+        console.print(Align.center(f"[bold cyan]{banner}[/bold cyan]"))
+        
+        text_str = "Advanced Cybercrime Stopper v4.0 - Initiating Systems..."
+        with Live(Text("", style="bold magenta", justify="center"), refresh_per_second=20, transient=False) as live:
+            for i in range(len(text_str) + 1):
+                live.update(Text(text_str[:i], style="bold magenta", justify="center"))
+                time.sleep(0.02)
+        print()
+
 def main():
     parser = argparse.ArgumentParser(description="VISION-CLI v4.0 - Advanced Cybercrime Stopper")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
@@ -447,6 +470,9 @@ def main():
 
     args = parser.parse_args()
     config = load_config()
+
+    if not args.json:
+        animated_banner()
 
     if args.command == "leak":
         cmd_leak(args, config)
