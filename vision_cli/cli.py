@@ -10,8 +10,13 @@ import ssl
 import datetime
 import concurrent.futures
 import contextlib
+import logging
 from urllib.parse import urlparse
 
+LOG_FILE = os.path.expanduser("~/.vision_cli.log")
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("vision-cli")
 try:
     from rich.console import Console
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
@@ -337,7 +342,7 @@ def cmd_phish(args, config):
     import requests
     
     # 1. VIRUS TOTAL INTEGRATION
-    vt_key = config.get("api_keys", {}).get("virustotal", "")
+    vt_key = os.environ.get("VISION_VT_API_KEY") or config.get("api_keys", {}).get("virustotal", "")
     if vt_key:
         if not args.json:
             console.print("[bold green][*] VirusTotal API key detected. Querying 70+ engines...[/bold green]" if RICH_ENABLED else "[*] VirusTotal API key detected. Querying 70+ engines...")
@@ -451,37 +456,49 @@ def animated_banner():
         print()
 
 def main():
-    parser = argparse.ArgumentParser(description="VISION-CLI v4.0 - Advanced Cybercrime Stopper")
-    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
-    
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    try:
+        parser = argparse.ArgumentParser(description="VISION-CLI v4.0 - Advanced Cybercrime Stopper")
+        parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+        
+        subparsers = parser.add_subparsers(dest="command", required=True)
 
-    leak_parser = subparsers.add_parser("leak", help="Scan for leaked secrets/PII")
-    leak_parser.add_argument("path", help="File or directory to scan")
+        leak_parser = subparsers.add_parser("leak", help="Scan for leaked secrets/PII")
+        leak_parser.add_argument("path", help="File or directory to scan")
 
-    morph_parser = subparsers.add_parser("morph", help="Check image for manipulation")
-    morph_parser.add_argument("image", help="Path to image file")
+        morph_parser = subparsers.add_parser("morph", help="Check image for manipulation")
+        morph_parser.add_argument("image", help="Path to image file")
 
-    breach_parser = subparsers.add_parser("breach", help="Lookup email in live breaches")
-    breach_parser.add_argument("email", help="Email to check")
-    
-    phish_parser = subparsers.add_parser("phish", help="Analyze URL for phishing indicators")
-    phish_parser.add_argument("url", help="URL to analyze")
+        breach_parser = subparsers.add_parser("breach", help="Lookup email in live breaches")
+        breach_parser.add_argument("email", help="Email to check")
+        
+        phish_parser = subparsers.add_parser("phish", help="Analyze URL for phishing indicators")
+        phish_parser.add_argument("url", help="URL to analyze")
 
-    args = parser.parse_args()
-    config = load_config()
+        args = parser.parse_args()
+        config = load_config()
 
-    if not args.json:
-        animated_banner()
+        if not args.json:
+            animated_banner()
 
-    if args.command == "leak":
-        cmd_leak(args, config)
-    elif args.command == "morph":
-        cmd_morph(args, config)
-    elif args.command == "breach":
-        cmd_breach(args, config)
-    elif args.command == "phish":
-        cmd_phish(args, config)
+        if args.command == "leak":
+            logger.info(f"Running leak scan on {args.path}")
+            cmd_leak(args, config)
+        elif args.command == "morph":
+            logger.info(f"Running morph scan on {args.image}")
+            cmd_morph(args, config)
+        elif args.command == "breach":
+            logger.info(f"Checking breach for {args.email}")
+            cmd_breach(args, config)
+        elif args.command == "phish":
+            logger.info(f"Checking phish URL {args.url}")
+            cmd_phish(args, config)
+
+    except KeyboardInterrupt:
+        logger.info("User aborted process (KeyboardInterrupt)")
+        console.print("\n[bold yellow][!] Process aborted by user.[/bold yellow]")
+    except Exception as e:
+        logger.exception(f"Unexpected error: {e}")
+        console.print(f"\n[bold red][!] An unexpected error occurred. Check {LOG_FILE} for details.[/bold red]")
 
 if __name__ == "__main__":
     main()
