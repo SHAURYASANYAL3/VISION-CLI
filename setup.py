@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="vision-cli",
-    version="4.0.0",
+    version="4.0.1",
     author="VISION",
     description="Advanced Cybercrime Stopper - Scan for leaked secrets, morph images, and more.",
     long_description=long_description,
