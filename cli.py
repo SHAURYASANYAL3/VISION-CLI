@@ -8,7 +8,34 @@ import yaml
 import socket
 import ssl
 import datetime
+import concurrent.futures
+import contextlib
 from urllib.parse import urlparse
+
+try:
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+    from rich.table import Table
+    from rich.panel import Panel
+    console = Console()
+    RICH_ENABLED = True
+except ImportError:
+    # Basic fallback if rich isn't installed yet
+    class Console:
+        def print(self, *args, **kwargs):
+            print(*args)
+        def status(self, *args, **kwargs):
+            return contextlib.nullcontext()
+    console = Console()
+    RICH_ENABLED = False
+    class Panel:
+        def __init__(self, text, **kwargs): self.text = text
+        def __str__(self): return self.text
+    class Table:
+        def __init__(self, **kwargs): self.rows = []
+        def add_column(self, *args, **kwargs): pass
+        def add_row(self, *args): self.rows.append(args)
+        def __str__(self): return "\\n".join(str(r) for r in self.rows)
 
 CONFIG_FILE = "config.yaml"
 
@@ -17,7 +44,8 @@ def load_config():
         default_config = {
             "api_keys": {
                 "alienvault": "",
-                "hibp": ""
+                "hibp": "",
+                "virustotal": ""
             }
         }
         with open(CONFIG_FILE, 'w') as f:
@@ -25,12 +53,21 @@ def load_config():
         return default_config
     
     with open(CONFIG_FILE, 'r') as f:
-        return yaml.safe_load(f) or {}
+        config = yaml.safe_load(f) or {}
+        if "api_keys" not in config:
+            config["api_keys"] = {}
+        if "virustotal" not in config["api_keys"]:
+            config["api_keys"]["virustotal"] = ""
+            with open(CONFIG_FILE, 'w') as f:
+                yaml.dump(config, f)
+        return config
 
 def cmd_leak(args, config):
-    if not args.json:
+    if not args.json and RICH_ENABLED:
+        console.print(Panel(f"Scanning [bold cyan]{args.path}[/bold cyan] for leaked secrets", title="VISION-CLI Leak Scanner", border_style="blue"))
+    elif not args.json:
         print(f"[*] Scanning {args.path} for leaks...")
-    
+        
     patterns = {
         "Email": r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+',
         "Generic Secret": r'(?i)(password|secret|api_key|token)[^\w]{1,5}["\']?([a-zA-Z0-9]{10,})["\']?'
@@ -42,63 +79,95 @@ def cmd_leak(args, config):
         if args.json:
             print(json.dumps({"status": "error", "message": "Path does not exist"}))
         else:
-            print("[-] Path does not exist.")
+            console.print("[bold red][-] Path does not exist.[/bold red]" if RICH_ENABLED else "[-] Path does not exist.")
         return
         
-    def scan_text(content, filepath, method="text"):
-        found_something = False
-        for name, pat in patterns.items():
-            matches = re.findall(pat, content)
-            if matches:
-                result["leaks_found"].append({"file": filepath, "type": name, "count": len(matches), "method": method})
-                if not args.json:
-                    print(f"[!] {name} found in {filepath} ({len(matches)} occurrences via {method})")
-                found_something = True
-        return found_something
-
     def scan_file(filepath):
-        # First, try to read as text
         try:
             with open(filepath, 'r', encoding='utf-8', errors='strict') as f:
                 content = f.read()
-            scan_text(content, filepath, "text")
-            return True
+            
+            found = []
+            for name, pat in patterns.items():
+                matches = re.findall(pat, content)
+                if matches:
+                    found.append({"file": filepath, "type": name, "count": len(matches), "method": "text"})
+            return True, found
         except UnicodeDecodeError:
-            # If it's a binary file, see if it's an image and try OCR
             try:
                 import pytesseract
                 from PIL import Image
                 img = Image.open(filepath)
-                # Ensure tesseract is installed on the system
                 text = pytesseract.image_to_string(img)
-                scan_text(text, filepath, "ocr")
-                return True
-            except ImportError:
-                if not args.json:
-                    print(f"[-] OCR skipped for {filepath}: pytesseract or PIL not installed.")
-                return False
-            except Exception as e:
-                # Not an image or tesseract not configured properly
-                return False
+                found = []
+                for name, pat in patterns.items():
+                    matches = re.findall(pat, text)
+                    if matches:
+                        found.append({"file": filepath, "type": name, "count": len(matches), "method": "ocr"})
+                return True, found
+            except Exception:
+                return False, []
         except Exception:
-            return False
+            return False, []
 
+    files_to_scan = []
     if os.path.isfile(args.path):
-        if scan_file(args.path):
-            result["scanned_files"] += 1
+        files_to_scan.append(args.path)
     else:
-        for root, _, files in os.walk(args.path):
+        for root, dirs, files in os.walk(args.path):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'node_modules']
             for file in files:
-                if scan_file(os.path.join(root, file)):
-                    result["scanned_files"] += 1
-                    
+                if not file.startswith('.'):
+                    files_to_scan.append(os.path.join(root, file))
+
+    if not args.json and RICH_ENABLED:
+        progress = Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), console=console)
+        task_id = progress.add_task("[cyan]Scanning files...", total=len(files_to_scan))
+        progress.start()
+    else:
+        progress = None
+        task_id = None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_file = {executor.submit(scan_file, f): f for f in files_to_scan}
+        for future in concurrent.futures.as_completed(future_to_file):
+            success, findings = future.result()
+            if success:
+                result["scanned_files"] += 1
+                result["leaks_found"].extend(findings)
+            if progress:
+                progress.advance(task_id)
+
+    if progress:
+        progress.stop()
+
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(f"[+] Leak scan complete. Scanned {result['scanned_files']} file(s).")
+        if result["leaks_found"]:
+            if RICH_ENABLED:
+                table = Table(title="🚨 Leaks Discovered", style="red")
+                table.add_column("File", style="cyan")
+                table.add_column("Type", style="magenta")
+                table.add_column("Occurrences", justify="right", style="green")
+                table.add_column("Method", style="yellow")
+                
+                for leak in result["leaks_found"]:
+                    table.add_row(leak["file"], leak["type"], str(leak["count"]), leak["method"])
+                
+                console.print(table)
+            else:
+                for leak in result["leaks_found"]:
+                    print(f"[!] {leak['type']} found in {leak['file']} ({leak['count']} occurrences via {leak['method']})")
+        else:
+            console.print("\n[bold green][+] No leaks detected.[/bold green]" if RICH_ENABLED else "[+] No leaks detected.")
+            
+        console.print(f"\n[dim]Total files scanned: {result['scanned_files']}[/dim]" if RICH_ENABLED else f"Total files scanned: {result['scanned_files']}")
 
 def cmd_morph(args, config):
-    if not args.json:
+    if not args.json and RICH_ENABLED:
+        console.print(Panel(f"Analyzing [bold cyan]{args.image}[/bold cyan] for AI generation", title="VISION-CLI Morph Checker", border_style="magenta"))
+    elif not args.json:
         print(f"[*] Checking {args.image} for morphs...")
     
     result = {"status": "success", "target": args.image, "method": "", "findings": []}
@@ -116,7 +185,7 @@ def cmd_morph(args, config):
         if args.json:
             print(json.dumps({"status": "error", "message": "No images found"}))
         else:
-            print("[-] No images found to scan.")
+            console.print("[bold red][-] No images found to scan.[/bold red]" if RICH_ENABLED else "[-] No images found to scan.")
         return
 
     try:
@@ -127,30 +196,63 @@ def cmd_morph(args, config):
         
         result["method"] = "advanced_ml_batch"
         if not args.json:
-            print(f"[*] Advanced ML libraries found. Running Deep Learning scan on {len(files_to_scan)} images...")
+            console.print("[bold green][*] Advanced ML libraries active. Initializing Deep Learning pipeline...[/bold green]" if RICH_ENABLED else "[*] Advanced ML libraries active. Running pipeline...")
             
         pipe = pipeline("image-classification", model="umm-maybe/AI-image-detector")
         
-        for filepath in files_to_scan:
+        if not args.json and RICH_ENABLED:
+            progress = Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), console=console)
+            task_id = progress.add_task("[magenta]Analyzing pixels...", total=len(files_to_scan))
+            progress.start()
+        else:
+            progress = None
+            task_id = None
+
+        def scan_img(filepath):
             try:
                 img = Image.open(filepath)
-                predictions = pipe(img)
-                file_findings = {"file": filepath, "predictions": []}
-                for res in predictions[:2]:
-                    file_findings["predictions"].append({"label": res['label'], "confidence": res['score']})
-                    if not args.json:
-                        print(f"[+] {filepath} -> {res['label']}: {round(res['score'] * 100, 2)}% confidence")
-                result["findings"].append(file_findings)
-            except Exception as e:
-                pass # Skip broken images
-        
+                return filepath, pipe(img)
+            except Exception:
+                return filepath, None
+
+        # Limit to 2 workers for ML to prevent OOM
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_file = {executor.submit(scan_img, f): f for f in files_to_scan}
+            for future in concurrent.futures.as_completed(future_to_file):
+                filepath, predictions = future.result()
+                if predictions:
+                    file_findings = {"file": filepath, "predictions": []}
+                    for res in predictions[:2]:
+                        file_findings["predictions"].append({"label": res['label'], "confidence": res['score']})
+                    result["findings"].append(file_findings)
+                if progress:
+                    progress.advance(task_id)
+                    
+        if progress:
+            progress.stop()
+
         if args.json:
             print(json.dumps(result, indent=2))
+        else:
+            if RICH_ENABLED:
+                table = Table(title="🤖 Morph Analysis Results")
+                table.add_column("File", style="cyan")
+                table.add_column("Top Prediction", style="magenta")
+                table.add_column("Confidence", justify="right", style="green")
+                
+                for finding in result["findings"]:
+                    top = finding["predictions"][0]
+                    table.add_row(finding["file"], top["label"], f"{round(top['confidence'] * 100, 2)}%")
+                console.print(table)
+            else:
+                for finding in result["findings"]:
+                    top = finding["predictions"][0]
+                    print(f"{finding['file']} -> {top['label']}: {round(top['confidence'] * 100, 2)}%")
 
     except ImportError:
         result["method"] = "basic_metadata_batch"
         if not args.json:
-            print("[!] ML libraries not found. Falling back to v1.0 metadata scan.")
+            console.print("[bold yellow][!] ML libraries not found. Falling back to fast metadata scan.[/bold yellow]" if RICH_ENABLED else "[!] ML libraries not found. Falling back to fast metadata scan.")
         
         for filepath in files_to_scan:
             try:
@@ -165,47 +267,52 @@ def cmd_morph(args, config):
                             sig = s.decode('utf-8', errors='ignore')
                             result["findings"].append({"file": filepath, "signature_found": sig})
                             if not args.json:
-                                print(f"[!] Warning: {filepath} contains metadata signature for {sig}")
+                                console.print(f"[bold red][!] Warning: {filepath} contains signature for {sig}[/bold red]" if RICH_ENABLED else f"[!] Warning: {filepath} contains signature for {sig}")
             except Exception:
                 continue
                 
         if not args.json:
-            print(f"[+] Metadata scan complete for {len(files_to_scan)} files.")
+            console.print(f"[bold green][+] Metadata scan complete for {len(files_to_scan)} files.[/bold green]" if RICH_ENABLED else f"[+] Metadata scan complete for {len(files_to_scan)} files.")
         if args.json:
             print(json.dumps(result, indent=2))
 
 def cmd_breach(args, config):
-    if not args.json:
+    if not args.json and RICH_ENABLED:
+        console.print(Panel(f"Looking up [bold cyan]{args.email}[/bold cyan] in global data breaches", title="VISION-CLI Breach Lookup", border_style="red"))
+    elif not args.json:
         print(f"[*] Checking {args.email} for breaches...")
     
     result = {"status": "success", "email": args.email, "breaches": []}
     
     try:
         import requests
-        if not args.json:
-            print("[*] Querying XposedOrNot threat intelligence API...")
-            
-        # Using XposedOrNot, a free alternative to HIBP that requires no API key
-        response = requests.get(f"https://api.xposedornot.com/v1/check-email/{args.email}")
         
-        if response.status_code == 200:
-            data = response.json()
-            breaches = data.get("breaches", [])
-            for b in breaches:
-                result["breaches"].append(b[0] if isinstance(b, list) else b)
-                
-            if not args.json:
-                print(f"[!] DANGER: Email found in {len(result['breaches'])} known data breaches!")
-                for b in result['breaches'][:5]:
-                    print(f"    - {b}")
-                if len(result['breaches']) > 5:
-                    print("    ... and more.")
-        elif response.status_code == 404:
-            if not args.json:
-                print("[+] Email looks clean. No breaches found.")
-        else:
-            if not args.json:
-                print(f"[-] API returned unexpected status code: {response.status_code}")
+        with console.status("[bold green]Querying XposedOrNot threat intelligence API...") if not args.json and RICH_ENABLED else contextlib.nullcontext():
+            response = requests.get(f"https://api.xposedornot.com/v1/check-email/{args.email}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                breaches = data.get("breaches", [])
+                for b in breaches:
+                    result["breaches"].append(b[0] if isinstance(b, list) else b)
+                    
+                if not args.json:
+                    if RICH_ENABLED:
+                        console.print(f"\n[bold red]🚨 DANGER: Email found in {len(result['breaches'])} known data breaches![/bold red]")
+                        table = Table(show_header=False, box=None)
+                        for b in result['breaches'][:10]:
+                            table.add_row(f"[red]• {b}[/red]")
+                        if len(result['breaches']) > 10:
+                            table.add_row(f"[dim]... and {len(result['breaches']) - 10} more.[/dim]")
+                        console.print(table)
+                    else:
+                        print(f"[!] DANGER: Email found in {len(result['breaches'])} known data breaches!")
+            elif response.status_code == 404:
+                if not args.json:
+                    console.print("\n[bold green]✅ Email looks clean. No breaches found.[/bold green]" if RICH_ENABLED else "[+] Email looks clean. No breaches found.")
+            else:
+                if not args.json:
+                    console.print(f"\n[bold yellow][-] API returned unexpected status code: {response.status_code}[/bold yellow]" if RICH_ENABLED else f"[-] API returned unexpected status code: {response.status_code}")
                 
         if args.json:
             print(json.dumps(result, indent=2))
@@ -214,10 +321,12 @@ def cmd_breach(args, config):
         if args.json:
             print(json.dumps({"status": "error", "message": "requests library not found"}))
         else:
-            print("[!] 'requests' library not found. Run: pip install -r requirements.txt")
+            console.print("[bold red][!] 'requests' library not found. Run: pip install -r requirements.txt[/bold red]" if RICH_ENABLED else "[!] 'requests' library not found. Run: pip install -r requirements.txt")
 
 def cmd_phish(args, config):
-    if not args.json:
+    if not args.json and RICH_ENABLED:
+        console.print(Panel(f"Analyzing URL for phishing indicators:\n[bold cyan]{args.url}[/bold cyan]", title="VISION-CLI Phish Analyzer", border_style="yellow"))
+    elif not args.json:
         print(f"[*] Analyzing URL for phishing indicators: {args.url}")
         
     result = {"status": "success", "url": args.url, "risk_score": 0, "indicators": []}
@@ -225,26 +334,39 @@ def cmd_phish(args, config):
     parsed = urlparse(args.url)
     domain = parsed.netloc or parsed.path
     
-    # 1. LIVE API THREAT INTEL (PhishStats)
-    try:
-        import requests
+    import requests
+    
+    # 1. VIRUS TOTAL INTEGRATION
+    vt_key = config.get("api_keys", {}).get("virustotal", "")
+    if vt_key:
         if not args.json:
-            print("[*] Querying Live Threat Databases (PhishStats)...")
-        # PhishStats API for known malicious URLs
+            console.print("[bold green][*] VirusTotal API key detected. Querying 70+ engines...[/bold green]" if RICH_ENABLED else "[*] VirusTotal API key detected. Querying 70+ engines...")
+        try:
+            headers = {"x-apikey": vt_key}
+            vt_url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+            resp = requests.get(vt_url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                stats = resp.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+                malicious = stats.get("malicious", 0)
+                phishing = stats.get("phishing", 0)
+                if malicious > 0 or phishing > 0:
+                    result["indicators"].append(f"CRITICAL: VirusTotal flagged this domain! (Malicious: {malicious}, Phishing: {phishing})")
+                    result["risk_score"] += 100
+        except Exception as e:
+            if not args.json:
+                console.print(f"[dim]VirusTotal query failed: {e}[/dim]" if RICH_ENABLED else f"VirusTotal query failed: {e}")
+    
+    # 2. PhishStats
+    try:
         ps_url = f"https://phishstats.info:2096/api/phishing?_where=(url,eq,{args.url})"
-        # Add timeout to not block forever
         resp = requests.get(ps_url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, list) and len(data) > 0:
                 result["indicators"].append("CRITICAL: URL found in live PhishStats malicious database!")
                 result["risk_score"] += 100
-        else:
-            if not args.json:
-                print("[-] Could not reach PhishStats API.")
-    except Exception as e:
-        if not args.json:
-            print(f"[-] Live threat query failed: {e}")
+    except Exception:
+        pass
 
     # Heuristics
     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', domain):
@@ -267,39 +389,46 @@ def cmd_phish(args, config):
             s.settimeout(3.0)
             s.connect((domain, 443))
             cert = s.getpeercert()
-            
             not_before = datetime.datetime.strptime(cert['notBefore'], "%b %d %H:%M:%S %Y %Z")
             age = (datetime.datetime.utcnow() - not_before).days
-            
             if age < 30:
                 result["indicators"].append(f"SSL certificate is very new ({age} days old)")
                 result["risk_score"] += 30
     except Exception as e:
-        result["indicators"].append(f"Failed to verify secure SSL/TLS connection: {str(e)[:50]}")
+        result["indicators"].append(f"Failed to verify secure SSL/TLS connection")
         result["risk_score"] += 25
 
     # Determine verdict
     if result["risk_score"] >= 60:
         verdict = "CRITICAL RISK (Highly likely phishing)"
+        color = "red"
     elif result["risk_score"] >= 30:
         verdict = "MODERATE RISK (Suspicious indicators found)"
+        color = "yellow"
     else:
         verdict = "LOW RISK (Looks generally safe)"
+        color = "green"
         
     result["verdict"] = verdict
 
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(f"[*] Risk Score: {result['risk_score']}/100")
-        print(f"[*] Verdict: {verdict}")
-        if result["indicators"]:
-            print("[!] Suspicious Indicators Found:")
-            for ind in result["indicators"]:
-                print(f"    - {ind}")
+        if RICH_ENABLED:
+            console.print(f"\n[*] Risk Score: [bold {color}]{result['risk_score']}/100[/bold {color}]")
+            console.print(f"[*] Verdict: [bold {color}]{verdict}[/bold {color}]\n")
+            
+            if result["indicators"]:
+                table = Table(title="⚠️ Suspicious Indicators", show_header=False, style="yellow")
+                for ind in result["indicators"]:
+                    table.add_row(ind)
+                console.print(table)
+        else:
+            print(f"[*] Risk Score: {result['risk_score']}/100")
+            print(f"[*] Verdict: {verdict}")
 
 def main():
-    parser = argparse.ArgumentParser(description="VISION-CLI v3.0 - Advanced Cybercrime Stopper")
+    parser = argparse.ArgumentParser(description="VISION-CLI v4.0 - Advanced Cybercrime Stopper")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
     
     subparsers = parser.add_subparsers(dest="command", required=True)
