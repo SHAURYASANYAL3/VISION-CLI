@@ -37,7 +37,7 @@ except ImportError:
         def add_row(self, *args): self.rows.append(args)
         def __str__(self): return "\\n".join(str(r) for r in self.rows)
 
-CONFIG_FILE = "config.yaml"
+CONFIG_FILE = os.path.expanduser("~/.vision_cli_config.yaml")
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
