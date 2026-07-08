@@ -53,8 +53,12 @@ def load_config():
                 "virustotal": ""
             }
         }
-        with open(CONFIG_FILE, 'w') as f:
-            yaml.dump(default_config, f)
+        try:
+            fd = os.open(CONFIG_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with open(fd, 'w') as f:
+                yaml.dump(default_config, f)
+        except Exception:
+            pass
         return default_config
     
     with open(CONFIG_FILE, 'r') as f:
@@ -63,8 +67,12 @@ def load_config():
             config["api_keys"] = {}
         if "virustotal" not in config["api_keys"]:
             config["api_keys"]["virustotal"] = ""
-            with open(CONFIG_FILE, 'w') as f:
-                yaml.dump(config, f)
+            try:
+                fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_TRUNC, 0o600)
+                with open(fd, 'w') as f:
+                    yaml.dump(config, f)
+            except Exception:
+                pass
         return config
 
 def cmd_leak(args, config):
@@ -88,30 +96,34 @@ def cmd_leak(args, config):
         return
         
     def scan_file(filepath):
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='strict') as f:
-                content = f.read()
-            
-            found = []
-            for name, pat in patterns.items():
-                matches = re.findall(pat, content)
-                if matches:
-                    found.append({"file": filepath, "type": name, "count": len(matches), "method": "text"})
-            return True, found
-        except UnicodeDecodeError:
+        findings = []
+        ext = os.path.splitext(filepath)[1].lower()
+        img_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff'}
+        
+        if ext in img_exts:
             try:
                 import pytesseract
                 from PIL import Image
                 img = Image.open(filepath)
                 text = pytesseract.image_to_string(img)
-                found = []
                 for name, pat in patterns.items():
                     matches = re.findall(pat, text)
                     if matches:
-                        found.append({"file": filepath, "type": name, "count": len(matches), "method": "ocr"})
-                return True, found
+                        findings.append({"file": filepath, "type": name, "count": len(matches), "method": "ocr"})
+                return True, findings
             except Exception:
                 return False, []
+                
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                for chunk in iter(lambda: f.read(4096 * 1024), ''):
+                    if not chunk:
+                        break
+                    for name, pat in patterns.items():
+                        matches = re.findall(pat, chunk)
+                        if matches:
+                            findings.append({"file": filepath, "type": name, "count": len(matches), "method": "text"})
+            return True, findings
         except Exception:
             return False, []
 
@@ -168,6 +180,7 @@ def cmd_leak(args, config):
             console.print("\n[bold green][+] No leaks detected.[/bold green]" if RICH_ENABLED else "[+] No leaks detected.")
             
         console.print(f"\n[dim]Total files scanned: {result['scanned_files']}[/dim]" if RICH_ENABLED else f"Total files scanned: {result['scanned_files']}")
+    return len(result["leaks_found"]) > 0
 
 def cmd_morph(args, config):
     if not args.json and RICH_ENABLED:
@@ -253,6 +266,7 @@ def cmd_morph(args, config):
                 for finding in result["findings"]:
                     top = finding["predictions"][0]
                     print(f"{finding['file']} -> {top['label']}: {round(top['confidence'] * 100, 2)}%")
+        return any(f["predictions"][0]["label"] in ["AI_GENERATED", "FAKE", "manipulated"] and f["predictions"][0]["confidence"] > 0.6 for f in result["findings"] if f["predictions"])
 
     except ImportError:
         result["method"] = "basic_metadata_batch"
@@ -280,6 +294,7 @@ def cmd_morph(args, config):
             console.print(f"[bold green][+] Metadata scan complete for {len(files_to_scan)} files.[/bold green]" if RICH_ENABLED else f"[+] Metadata scan complete for {len(files_to_scan)} files.")
         if args.json:
             print(json.dumps(result, indent=2))
+        return len(result["findings"]) > 0
 
 def cmd_breach(args, config):
     if not args.json and RICH_ENABLED:
@@ -321,6 +336,7 @@ def cmd_breach(args, config):
                 
         if args.json:
             print(json.dumps(result, indent=2))
+        return len(result["breaches"]) > 0
             
     except ImportError:
         if args.json:
@@ -390,10 +406,10 @@ def cmd_phish(args, config):
     # SSL Check
     try:
         ctx = ssl.create_default_context()
-        with ctx.wrap_socket(socket.socket(), server_hostname=domain) as s:
-            s.settimeout(3.0)
-            s.connect((domain, 443))
-            cert = s.getpeercert()
+        s = socket.create_connection((domain, 443), timeout=3.0)
+        with ctx.wrap_socket(s, server_hostname=domain) as ss:
+            ss.settimeout(3.0)
+            cert = ss.getpeercert()
             not_before = datetime.datetime.strptime(cert['notBefore'], "%b %d %H:%M:%S %Y %Z")
             age = (datetime.datetime.utcnow() - not_before).days
             if age < 30:
@@ -431,6 +447,7 @@ def cmd_phish(args, config):
         else:
             print(f"[*] Risk Score: {result['risk_score']}/100")
             print(f"[*] Verdict: {verdict}")
+    return result["risk_score"] >= 60
 
 def animated_banner():
     if RICH_ENABLED:
@@ -456,6 +473,7 @@ def animated_banner():
         print()
 
 def main():
+    import sys
     try:
         parser = argparse.ArgumentParser(description="VISION-CLI v4.0 - Advanced Cybercrime Stopper")
         parser.add_argument("--json", action="store_true", help="Output results in JSON format")
@@ -480,18 +498,22 @@ def main():
         if not args.json:
             animated_banner()
 
+        has_issues = False
         if args.command == "leak":
             logger.info(f"Running leak scan on {args.path}")
-            cmd_leak(args, config)
+            has_issues = cmd_leak(args, config)
         elif args.command == "morph":
             logger.info(f"Running morph scan on {args.image}")
-            cmd_morph(args, config)
+            has_issues = cmd_morph(args, config)
         elif args.command == "breach":
             logger.info(f"Checking breach for {args.email}")
-            cmd_breach(args, config)
+            has_issues = cmd_breach(args, config)
         elif args.command == "phish":
             logger.info(f"Checking phish URL {args.url}")
-            cmd_phish(args, config)
+            has_issues = cmd_phish(args, config)
+            
+        if has_issues:
+            sys.exit(1)
 
     except KeyboardInterrupt:
         logger.info("User aborted process (KeyboardInterrupt)")
