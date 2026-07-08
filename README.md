@@ -1,8 +1,8 @@
-# VISION-CLI v4.0.1
+# VISION-CLI v5.0.0 (Enterprise Edition)
 
 **VISION-CLI** is an advanced, enterprise-grade threat intelligence and cybercrime prevention CLI built in Python. Designed to stop data leaks, detect AI-generated media, and block phishing attacks—all from your terminal.
 
-🚀 **New in v4.0**: Completely overhauled UI using `rich`, multi-threaded parallel scanning for massive speed boosts, automated PyPI publishing, and robust error handling!
+🚀 **New in v5.0**: A massive architectural overhaul delivering production-ready stability. Features include O(1) memory profiling with `mmap` for scanning 100GB+ files, Exponential Backoff for resilient API calls, strict zero-trust config permissions, and a modular plugin architecture tested with 100% Mock E2E coverage.
 
 ## Installation
 
